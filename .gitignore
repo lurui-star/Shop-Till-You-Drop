@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Jupyter / Python
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# Data (adjust paths as needed)
+data/
+
