@@ -1,1 +1,1 @@
-PATH = ''
+BATCH_SIZE = 64

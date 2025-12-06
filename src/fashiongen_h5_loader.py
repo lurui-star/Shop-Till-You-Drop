@@ -185,7 +185,7 @@ class FashionGenH5(Dataset):
         self,
         h5_path: str,
         image_key: str = "input_image",
-        caption_key_candidates: Tuple[str, ...] = ("input_description","input_concat_description","captions","descriptions","caption","description"),
+        caption_key_candidates: Tuple[str, ...] = ("input_name", "input_description","input_concat_description","captions","descriptions","caption","description"),
         label_key_candidates: Tuple[str, ...] = ("input_category","category","articleType","class","label"),
         use_random_caption: bool = True,
         image_size: int = 256,
@@ -318,6 +318,24 @@ class FashionGenH5(Dataset):
             "caption": caption,
             "index": int(real_i),
         }
+    
+    def __getstate__(self):
+        # drop non-picklable file handle before workers are spawned
+        state = self.__dict__.copy()
+        state["_h5"] = None
+        return state
+
+    def __setstate__(self, state):
+        # restore; keep closed so each worker opens its own handle on first __getitem__
+        self.__dict__.update(state)
+        self._h5 = None
+
+    def __del__(self):
+        try:
+            if getattr(self, "_h5", None) is not None:
+                self._h5.close()
+        except Exception:
+            pass
 
 # ==========================
 # E) Transforms & builders
