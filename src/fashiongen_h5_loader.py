@@ -1,7 +1,7 @@
 # fashiongen_h5_loader.py
 from pathlib import Path
 import zipfile, re, json, random
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Iterable
 from collections import defaultdict, Counter
 
 import numpy as np
@@ -11,6 +11,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torchvision import transforms
 
+import constant as c  
+
 # ==========================
 # A) ZIP → ensure H5 present
 # ==========================
@@ -19,21 +21,11 @@ def ensure_h5_ready(
     out_dir: Optional[str] = None,
     need_unzip: Optional[bool] = None,
     force_reextract: bool = False,
-    h5_glob: str = "**/*.h5",  # recursive search
+    h5_glob: str = "**/*.h5",
 ) -> List[Path]:
-    """
-    Ensure FashionGen .h5 files are available.
-
-    - If `src_path` is a .zip, it extracts (only if needed) into `out_dir`
-      (default: alongside the zip, folder=<zip_stem>).
-    - If `src_path` is a directory, it just looks for .h5 files inside.
-    - Returns a list of .h5 Paths.
-    """
     src = Path(src_path)
     if not src.exists():
         raise FileNotFoundError(f"Path not found: {src}")
-
-    # Determine if unzip is needed
     if need_unzip is None:
         need_unzip = src.suffix.lower() == ".zip"
 
@@ -42,17 +34,14 @@ def ensure_h5_ready(
             raise ValueError(f"Asked to unzip, but not a .zip: {src}")
         extract_dir = Path(out_dir) if out_dir else src.with_suffix("")
         extract_dir.mkdir(parents=True, exist_ok=True)
-
         existing_h5 = sorted(extract_dir.rglob(h5_glob))
         if existing_h5 and not force_reextract:
             return existing_h5
-
         with zipfile.ZipFile(src, "r") as zf:
             for m in zf.infolist():
                 if m.filename.startswith("__MACOSX/"):
                     continue
                 zf.extract(m, extract_dir)
-
         h5_files = sorted(extract_dir.rglob(h5_glob))
         if not h5_files:
             raise FileNotFoundError(f"No {h5_glob} found after extraction in {extract_dir}")
@@ -71,12 +60,6 @@ def ensure_h5_ready(
 # B) String utils & canonicalizers
 # ==========================
 def _decode_bytes(x):
-    """
-    Robustly decode HDF5 bytes-like values.
-    - Handles np.void (fixed-len strings), bytes, bytearray, np.bytes_
-    - Strips trailing NULs
-    - Tries utf-8, then latin-1, then utf-8 with 'ignore'
-    """
     import numpy as _np
     if isinstance(x, _np.void):
         b = bytes(x)
@@ -93,35 +76,73 @@ def _decode_bytes(x):
     return b.decode("utf-8", errors="ignore")
 
 def _as_scalar(x):
-    """Turn (1,) arrays or 0-d arrays into a Python scalar for clean decoding."""
     import numpy as _np
     if isinstance(x, _np.ndarray):
         return x.squeeze().item() if x.ndim > 0 else x.item()
     return x
 
-def _norm_text(s: str) -> str:
-    return re.sub(r"\s+", " ", str(s).strip().lower())
-
 def canonicalize_category(cat: str) -> str:
     s = str(cat).replace("\\", "/").strip().lower()
-    # If categories are hierarchical, keep the most specific tail
     for sep in ["/", ">", "|", ",", ";"]:
         if sep in s:
             s = s.split(sep)[-1]
-    s = re.sub(r"\s+", " ", s)
-    return s
+    return re.sub(r"\s+", " ", s)
 
-_GENDER_MAP = {
-    "women": "women", "woman": "women", "female": "women",
-    "men": "men", "man": "men", "male": "men",
-    "unisex": "unisex", "kids": "kids", "kid": "kids",
-}
 def canonicalize_gender(g: str) -> str:
-    s = _norm_text(g)
-    return _GENDER_MAP.get(s, s)
+    m = {"women":"women","woman":"women","female":"women",
+         "men":"men","man":"men","male":"men",
+         "unisex":"unisex","kids":"kids","kid":"kids"}
+    s = re.sub(r"\s+"," ",str(g).strip().lower())
+    return m.get(s, s)
+
+# ---- Materials parsing helpers ----
+FIELD_PREFIX_RE = re.compile(
+    r'\b(upper|body|shell|lining|trim|hardware|sole|fill|pocket lining|sleeve lining|detail|details)\s*:\s*',
+    flags=re.I
+)
+def _strip_context_tokens(s: str) -> str:
+    return FIELD_PREFIX_RE.sub("", s)
+
+PCT_NAME_RE = re.compile(r'(\d{1,3})\s*%?\s*([A-Za-z][A-Za-z\-\s]+)', re.I)
+
+def _normalize_token(tok: str) -> str:
+    t = tok.strip().lower().replace(".", "").replace(",", "")
+    t = re.sub(r"\s+", " ", t)
+    return c.ALIASES.get(t, t)
+
+def parse_composition_to_base_materials(s: str, *, clothing_only: bool = True) -> List[str]:
+    if not s:
+        return []
+    s = _strip_context_tokens(str(s))
+    mats: List[str] = []
+    pairs = PCT_NAME_RE.findall(s)
+    if pairs:
+        for _, name in pairs:
+            mats.append(_normalize_token(name))
+    else:
+        for piece in re.split(r'[;/,]| and ', s):
+            if piece.strip():
+                mats.append(_normalize_token(piece))
+    split_expand: List[str] = []
+    for m in mats:
+        split_expand += [_normalize_token(t) for t in re.split(r'[\s/+-]', m) if t.strip()]
+    keep = []
+    for m in split_expand:
+        m = c.ALIASES.get(m, m)
+        if m in c.BASE_MATS:
+            keep.append(m)
+    if clothing_only:
+        DROP = {"brass","steel","stainless steel","silver","gold","titanium","aluminum","ceramic",
+                "glass","crystal","wood","paper","stone","pearl"}
+        keep = [m for m in keep if m not in DROP]
+    seen, uniq = set(), []
+    for m in keep:
+        if m not in seen:
+            uniq.append(m); seen.add(m)
+    return uniq
 
 # ==========================
-# C) Build label vocabulary (category or gender)
+# C) Vocab builders (category/gender/material)
 # ==========================
 def build_vocab_from_h5(
     h5_path: str,
@@ -130,10 +151,6 @@ def build_vocab_from_h5(
     min_count: int = 1,
     out_json: str = "label_vocab.json",
 ) -> Dict[str, int]:
-    """
-    Build a string-label → id mapping from an H5 dataset.
-    Uses canonicalizers for consistent mapping.
-    """
     cnt = Counter()
     with h5py.File(h5_path, "r") as f:
         if label_key not in f:
@@ -143,29 +160,72 @@ def build_vocab_from_h5(
         is_int = np.issubdtype(d.dtype, np.integer)
         for i in range(N):
             raw = _as_scalar(d[i])
-            if is_int:
-                x = str(int(raw))
-            else:
-                x = _decode_bytes(raw)
+            x = str(int(raw)) if is_int else _decode_bytes(raw)
             x = canonicalize_gender(x) if label_key.lower().endswith("gender") else canonicalize_category(x)
             cnt[x] += 1
-
     vocab: Dict[str, int] = {}
     idx = 0
     if add_other and not label_key.lower().endswith("gender"):
-        vocab["__other__"] = idx
-        idx += 1
-
-    # keep all >= min_count
+        vocab["__other__"] = idx; idx += 1
     for k, n in sorted(cnt.items()):
         if n >= min_count and k not in vocab:
-            vocab[k] = idx
-            idx += 1
-
+            vocab[k] = idx; idx += 1
     with open(out_json, "w") as f:
         json.dump(vocab, f, indent=2, sort_keys=True)
     print(f"[vocab:{label_key}] Saved {len(vocab)} labels to {out_json}")
     return vocab
+
+def build_material_vocab_from_h5(
+    h5_path: str,
+    composition_key: str = "input_composition",
+    *,
+    clothing_only: bool = True,
+    min_count: int = 25,
+    top_k: Optional[int] = 50,
+    add_other: bool = True,
+    out_json: str = "material_vocab.json",
+) -> Dict[str, int]:
+    cnt = Counter()
+    with h5py.File(h5_path, "r") as f:
+        if composition_key not in f:
+            raise KeyError(f"'{composition_key}' not found in {list(f.keys())}")
+        d = f[composition_key]
+        N = d.shape[0]
+        is_int = np.issubdtype(d.dtype, np.integer)
+        for i in range(N):
+            raw = _as_scalar(d[i])
+            text = str(int(raw)) if is_int else _decode_bytes(raw)
+            for m in parse_composition_to_base_materials(text, clothing_only=clothing_only):
+                cnt[m] += 1
+    items = [(m, n) for m, n in cnt.items() if n >= min_count]
+    items.sort(key=lambda kv: (-kv[1], kv[0]))
+    if top_k is not None:
+        items = items[:top_k]
+    vocab: Dict[str, int] = {}
+    idx = 0
+    if add_other:
+        vocab["__other__"] = idx; idx += 1
+    for m, _ in items:
+        vocab[m] = idx; idx += 1
+    with open(out_json, "w") as f:
+        json.dump(vocab, f, indent=2, sort_keys=True)
+    print(f"[material_vocab] kept {len(vocab)} tokens → {out_json}")
+    return vocab
+
+def encode_materials_multi_hot(texts: Iterable[str], vocab: Dict[str,int], clothing_only: bool = True) -> np.ndarray:
+    V = len(vocab)
+    arr = np.zeros((len(texts), V), dtype=np.float32)
+    for i, t in enumerate(texts):
+        mats = parse_composition_to_base_materials(t, clothing_only=clothing_only)
+        hit = False
+        for m in mats:
+            j = vocab.get(m, vocab.get("__other__"))
+            if j is not None:
+                arr[i, j] = 1.0
+                hit = True
+        if not hit and "__other__" in vocab:
+            arr[i, vocab["__other__"]] = 1.0
+    return arr
 
 # ==========================
 # D) Worker-safe H5 Dataset
@@ -173,26 +233,33 @@ def build_vocab_from_h5(
 class FashionGenH5(Dataset):
     """
     Returns dict:
-      image: Tensor [3,H,W]
-      label: int (category id) or string (if no vocab provided)
-      label_raw: raw category string
-      gender: int (gender id) or string (if no vocab provided)
-      gender_raw: raw gender string
-      caption: str
-      index: int (raw H5 row index)
+      image:   Tensor [3,H,W]
+      label:   int (category id) or string (if no vocab)
+      label_raw, gender, gender_raw
+      caption: str  (prefers input_name if present)
+      materials: np.ndarray [V_mat] (multi-hot) if material_vocab provided, else None
+      meta:    dict[str, Any]  (optional metadata fields copied from H5)
+      index:   int row index
     """
     def __init__(
         self,
         h5_path: str,
         image_key: str = "input_image",
-        caption_key_candidates: Tuple[str, ...] = ("input_name", "input_description","input_concat_description","captions","descriptions","caption","description"),
+        caption_key_candidates: Tuple[str, ...] = ("input_name","input_description","input_concat_description","captions","descriptions","caption","description"),
         label_key_candidates: Tuple[str, ...] = ("input_category","category","articleType","class","label"),
         use_random_caption: bool = True,
         image_size: int = 256,
         normalize: str = "imagenet",
-        vocab_label_json: Optional[str] = None,   # category vocab
-        vocab_gender_json: Optional[str] = None,  # gender vocab
-        drop_unknown: bool = False,               # (kept for API symmetry; not filtering here)
+        vocab_label_json: Optional[str] = None,
+        vocab_gender_json: Optional[str] = None,
+        # Materials
+        material_vocab_json: Optional[str] = None,
+        composition_key: str = "input_composition",
+        materials_clothing_only: bool = True,
+        # Metadata
+        meta_keys: Tuple[str, ...] = (),
+        meta_prefix: str = "",
+        drop_unknown: bool = False,
         train_transforms: Optional[transforms.Compose] = None,
     ):
         super().__init__()
@@ -201,6 +268,8 @@ class FashionGenH5(Dataset):
         self.caption_key_candidates = caption_key_candidates
         self.label_key_candidates = label_key_candidates
         self.use_random_caption = use_random_caption
+        self.materials_clothing_only = materials_clothing_only
+        self.meta_prefix = meta_prefix
 
         # transforms
         if train_transforms is not None:
@@ -213,7 +282,7 @@ class FashionGenH5(Dataset):
                 t += [transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])]
             self.transform = transforms.Compose(t)
 
-        # load vocabs
+        # vocabs
         self.label_vocab = None
         self.gender_vocab = None
         self.other_id = None
@@ -224,8 +293,12 @@ class FashionGenH5(Dataset):
         if vocab_gender_json and Path(vocab_gender_json).exists():
             with open(vocab_gender_json) as g:
                 self.gender_vocab = json.load(g)
+        self.material_vocab = None
+        if material_vocab_json and Path(material_vocab_json).exists():
+            with open(material_vocab_json) as mf:
+                self.material_vocab = json.load(mf)
 
-        # inspect file & select keys
+        # inspect file
         with h5py.File(self.h5_path, "r") as f:
             if self.image_key not in f:
                 raise KeyError(f"'{self.image_key}' not found in {list(f.keys())}")
@@ -233,6 +306,8 @@ class FashionGenH5(Dataset):
             self.caption_key = next((k for k in self.caption_key_candidates if k in f), None)
             self.label_key   = next((k for k in self.label_key_candidates   if k in f), None)
             self.gender_key  = next((k for k in ("input_gender","gender")   if k in f), None)
+            self.composition_key = composition_key if composition_key in f else None
+            self.meta_keys_present = tuple(k for k in meta_keys if k in f)
             self.keep_idx = np.arange(self._length, dtype=np.int64)
 
         self._h5 = None
@@ -245,18 +320,7 @@ class FashionGenH5(Dataset):
             self._h5 = h5py.File(self.h5_path, "r")
         return self._h5
 
-    def _pick_caption(self, cap_entry):
-        if isinstance(cap_entry, (bytes, np.bytes_)):
-            return _decode_bytes(cap_entry)
-        if isinstance(cap_entry, (np.ndarray, list)):
-            if len(cap_entry) == 0:
-                return ""
-            j = random.randrange(len(cap_entry)) if self.use_random_caption else 0
-            return _decode_bytes(cap_entry[j])
-        return str(cap_entry)
-
     def _label_to_id(self, raw_label):
-        # map raw category string -> id using category vocab
         if isinstance(raw_label, (int, np.integer)):
             return int(raw_label)
         s = canonicalize_category(raw_label)
@@ -289,10 +353,7 @@ class FashionGenH5(Dataset):
             d = f[self.label_key]
             is_int = np.issubdtype(d.dtype, np.integer)
             raw = _as_scalar(d[real_i])
-            if is_int:
-                raw = int(raw)
-            else:
-                raw = _decode_bytes(raw)
+            raw = int(raw) if is_int else _decode_bytes(raw)
             label_raw = raw
             label_id = self._label_to_id(raw)
 
@@ -307,29 +368,59 @@ class FashionGenH5(Dataset):
             if self.gender_vocab is not None and g in self.gender_vocab:
                 gender_id = int(self.gender_vocab[g])
             else:
-                gender_id = g  # string fallback
+                gender_id = g
+
+        # materials (multi-hot vector if vocab provided)
+        mat_vec = None
+        if self.material_vocab is not None and self.composition_key is not None:
+            comp_text = _decode_bytes(_as_scalar(f[self.composition_key][real_i]))
+            mats = parse_composition_to_base_materials(comp_text, clothing_only=self.materials_clothing_only)
+            V = len(self.material_vocab)
+            v = np.zeros((V,), dtype=np.float32)
+            hit = False
+            for m in mats:
+                j = self.material_vocab.get(m, self.material_vocab.get("__other__"))
+                if j is not None:
+                    v[j] = 1.0
+                    hit = True
+            if not hit and "__other__" in self.material_vocab:
+                v[self.material_vocab["__other__"]] = 1.0
+            mat_vec = v
+
+        # metadata dict
+        meta: Dict[str, Any] = {}
+        for mk in self.meta_keys_present:
+            d = f[mk]
+            val = _as_scalar(d[real_i])
+            if np.issubdtype(d.dtype, np.integer):
+                meta_val = int(val)
+            elif np.issubdtype(d.dtype, np.floating):
+                meta_val = float(val)
+            else:
+                meta_val = _decode_bytes(val)
+            out_name = mk[len(self.meta_prefix):] if (self.meta_prefix and mk.startswith(self.meta_prefix)) else mk
+            meta[out_name] = meta_val
 
         return {
             "image": img,
-            "label": label_id,            # category id
-            "label_raw": label_raw,       # category string
-            "gender": gender_id,          # gender id (or string if no vocab)
-            "gender_raw": gender_raw,     # gender string
+            "label": label_id,
+            "label_raw": label_raw,
+            "gender": gender_id,
+            "gender_raw": gender_raw,
             "caption": caption,
+            "materials": mat_vec,
+            "meta": meta,
             "index": int(real_i),
         }
-    
+
+    # make DataLoader workers safe (no shared open handles)
     def __getstate__(self):
-        # drop non-picklable file handle before workers are spawned
         state = self.__dict__.copy()
         state["_h5"] = None
         return state
-
     def __setstate__(self, state):
-        # restore; keep closed so each worker opens its own handle on first __getitem__
         self.__dict__.update(state)
         self._h5 = None
-
     def __del__(self):
         try:
             if getattr(self, "_h5", None) is not None:
@@ -363,9 +454,14 @@ def make_datasets_from_h5(
     *,
     vocab_label_json: Optional[str] = None,
     vocab_gender_json: Optional[str] = None,
+    material_vocab_json: Optional[str] = None,
+    composition_key: str = "input_composition",
+    materials_clothing_only: bool = True,
     image_key: str = "input_image",
     label_key_candidates: Tuple[str, ...] = ("input_category","category","articleType","class","label"),
-    caption_key_candidates: Tuple[str, ...] = ("input_description","input_concat_description","captions","descriptions","caption","description"),
+    caption_key_candidates: Tuple[str, ...] = ("input_name","input_description","input_concat_description","captions","descriptions","caption","description"),
+    meta_keys: Tuple[str, ...] = (),
+    meta_prefix: str = "",
     image_size: int = 256,
     normalize: str = "imagenet",
     drop_unknown: bool = False,
@@ -376,22 +472,28 @@ def make_datasets_from_h5(
     train_ds = FashionGenH5(
         train_h5, image_key, caption_key_candidates, label_key_candidates,
         True, image_size, normalize,
-        vocab_label_json=vocab_label_json,
-        vocab_gender_json=vocab_gender_json,
+        vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=drop_unknown, train_transforms=train_tf
     )
     val_ds = FashionGenH5(
         val_h5, image_key, caption_key_candidates, label_key_candidates,
         False, image_size, normalize,
-        vocab_label_json=vocab_label_json,
-        vocab_gender_json=vocab_gender_json,
+        vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=drop_unknown, train_transforms=eval_tf
     ) if val_h5 else None
     test_ds = FashionGenH5(
         test_h5, image_key, caption_key_candidates, label_key_candidates,
         False, image_size, normalize,
-        vocab_label_json=vocab_label_json,
-        vocab_gender_json=vocab_gender_json,
+        vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=drop_unknown, train_transforms=eval_tf
     ) if test_h5 else None
     return train_ds, val_ds, test_ds
@@ -424,7 +526,7 @@ def make_loaders(
     return train_loader, val_loader, test_loader
 
 # ==========================
-# F) Splitting helpers (for test-from-train)
+# F) Stratified split helpers
 # ==========================
 def read_label_ids_from_h5(
     h5_path: str,
@@ -437,7 +539,6 @@ def read_label_ids_from_h5(
         with open(vocab_json) as f:
             vocab = json.load(f)
         other_id = vocab.get("__other__", 0)
-
     with h5py.File(h5_path, "r") as f:
         if label_key not in f:
             raise KeyError(f"'{label_key}' not in {list(f.keys())}")
@@ -453,7 +554,7 @@ def read_label_ids_from_h5(
                 raw = _as_scalar(d[i])
                 s = _decode_bytes(raw)
                 s = canonicalize_gender(s) if label_key.lower().endswith("gender") else canonicalize_category(s)
-                labels[i] = vocab.get(s, other_id) if vocab else s  # type: ignore
+                labels[i] = vocab.get(s, other_id) if vocab else 0
     return labels
 
 def stratified_train_test_indices(
@@ -478,10 +579,15 @@ def make_loaders_with_existing_val(
     val_h5: str,
     vocab_label_json: str,
     vocab_gender_json: Optional[str] = None,
+    material_vocab_json: Optional[str] = None,
+    composition_key: str = "input_composition",
+    materials_clothing_only: bool = True,
     image_key: str = "input_image",
     label_key: str = "input_category",
-    caption_key_candidates: Tuple[str, ...] = ("input_description","input_concat_description","caption","descriptions"),
+    caption_key_candidates: Tuple[str, ...] = ("input_name","input_description","input_concat_description","caption","descriptions"),
     label_key_candidates: Tuple[str, ...] = ("input_category","category","class","label"),
+    meta_keys: Tuple[str, ...] = (),
+    meta_prefix: str = "",
     image_size: int = 256,
     normalize: str = "imagenet",
     train_ratio: float = 0.9,
@@ -500,6 +606,9 @@ def make_loaders_with_existing_val(
         train_h5, image_key, caption_key_candidates, label_key_candidates,
         True, image_size, normalize,
         vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=False, train_transforms=train_tf
     )
     train_ds.keep_idx = train_idx
@@ -508,6 +617,9 @@ def make_loaders_with_existing_val(
         train_h5, image_key, caption_key_candidates, label_key_candidates,
         False, image_size, normalize,
         vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=False, train_transforms=eval_tf
     )
     test_ds.keep_idx = test_idx
@@ -516,6 +628,9 @@ def make_loaders_with_existing_val(
         val_h5, image_key, caption_key_candidates, label_key_candidates,
         False, image_size, normalize,
         vocab_label_json=vocab_label_json, vocab_gender_json=vocab_gender_json,
+        material_vocab_json=material_vocab_json, composition_key=composition_key,
+        materials_clothing_only=materials_clothing_only,
+        meta_keys=meta_keys, meta_prefix=meta_prefix,
         drop_unknown=False, train_transforms=eval_tf
     )
 
