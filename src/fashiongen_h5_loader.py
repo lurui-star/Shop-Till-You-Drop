@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torchvision import transforms
 
-import constant as c  
+import constant as c  # expects c.ALIASES and c.BASE_MATS
 
 # ==========================
 # A) ZIP → ensure H5 present
@@ -103,6 +103,7 @@ FIELD_PREFIX_RE = re.compile(
 def _strip_context_tokens(s: str) -> str:
     return FIELD_PREFIX_RE.sub("", s)
 
+# e.g., "80% wool, 20% nylon"
 PCT_NAME_RE = re.compile(r'(\d{1,3})\s*%?\s*([A-Za-z][A-Za-z\-\s]+)', re.I)
 
 def _normalize_token(tok: str) -> str:
@@ -146,7 +147,7 @@ def parse_composition_to_base_materials(s: str, *, clothing_only: bool = True) -
 # ==========================
 def build_vocab_from_h5(
     h5_path: str,
-    label_key: str = "category",  # e.g., "input_category" or "input_gender"
+    label_key: str = "category",
     add_other: bool = True,
     min_count: int = 1,
     out_json: str = "label_vocab.json",
@@ -237,8 +238,9 @@ class FashionGenH5(Dataset):
       label:   int (category id) or string (if no vocab)
       label_raw, gender, gender_raw
       caption: str  (prefers input_name if present)
+      material: int or None (dominant single-label id for CE)
       materials: np.ndarray [V_mat] (multi-hot) if material_vocab provided, else None
-      meta:    dict[str, Any]  (optional metadata fields copied from H5)
+      meta:    dict[str, Any]
       index:   int row index
     """
     def __init__(
@@ -332,6 +334,38 @@ class FashionGenH5(Dataset):
             return int(self.other_id)
         return None
 
+    # ---- NEW: pick a single dominant material id for CE ----
+    def _dominant_material_id(self, comp_text: Optional[str], min_pct:int=10) -> Optional[int]:
+        if self.material_vocab is None or not comp_text:
+            return None
+
+        # 1) try to use explicit percentages
+        best = None  # (pct, id)
+        for pct_str, name in PCT_NAME_RE.findall(comp_text):
+            try:
+                pct = int(pct_str)
+            except Exception:
+                continue
+            # name may include descriptors; parse to base mats
+            bases = parse_composition_to_base_materials(name, clothing_only=self.materials_clothing_only)
+            for token in bases:
+                j = self.material_vocab.get(token)
+                if j is not None and pct >= min_pct:
+                    if best is None or pct > best[0]:
+                        best = (pct, j)
+                    break  # one mapping per chunk
+        if best is not None:
+            return best[1]
+
+        # 2) fallback: first parsed token
+        majors = ("cotton","polyester","nylon","wool","leather","silk","viscose","linen","acrylic","cashmere","rayon")
+        for token in parse_composition_to_base_materials(comp_text, clothing_only=self.materials_clothing_only):
+            if token in majors and token in self.material_vocab:
+                return self.material_vocab[token]
+
+        # 3) final: __other__ if present
+        return self.material_vocab.get("__other__")
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         real_i = self.keep_idx[idx]
         f = self._get_h5()
@@ -347,7 +381,7 @@ class FashionGenH5(Dataset):
             cap_val = _as_scalar(f[self.caption_key][real_i])
             caption = _decode_bytes(cap_val)
 
-        # category label
+        # category
         label_raw, label_id = None, None
         if self.label_key is not None:
             d = f[self.label_key]
@@ -370,13 +404,16 @@ class FashionGenH5(Dataset):
             else:
                 gender_id = g
 
-        # materials (multi-hot vector if vocab provided)
+        # materials (multi-hot) + dominant single id
         mat_vec = None
+        mat_id = None
         if self.material_vocab is not None and self.composition_key is not None:
             comp_text = _decode_bytes(_as_scalar(f[self.composition_key][real_i]))
-            mats = parse_composition_to_base_materials(comp_text, clothing_only=self.materials_clothing_only)
+
+            # multi-hot
             V = len(self.material_vocab)
             v = np.zeros((V,), dtype=np.float32)
+            mats = parse_composition_to_base_materials(comp_text, clothing_only=self.materials_clothing_only)
             hit = False
             for m in mats:
                 j = self.material_vocab.get(m, self.material_vocab.get("__other__"))
@@ -387,7 +424,10 @@ class FashionGenH5(Dataset):
                 v[self.material_vocab["__other__"]] = 1.0
             mat_vec = v
 
-        # metadata dict
+            # dominant id
+            mat_id = self._dominant_material_id(comp_text)
+
+        # metadata
         meta: Dict[str, Any] = {}
         for mk in self.meta_keys_present:
             d = f[mk]
@@ -408,12 +448,13 @@ class FashionGenH5(Dataset):
             "gender": gender_id,
             "gender_raw": gender_raw,
             "caption": caption,
-            "materials": mat_vec,
+            "material": mat_id,     # <--- single-label id for CE
+            "materials": mat_vec,   # multi-hot (kept for analysis / future)
             "meta": meta,
             "index": int(real_i),
         }
 
-    # make DataLoader workers safe (no shared open handles)
+    # make DataLoader workers safe
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_h5"] = None
@@ -441,10 +482,13 @@ def build_transforms(image_size: int = 256, train: bool = False, norm: str = "im
         ]
     else:
         t = [transforms.Resize((image_size, image_size)), transforms.ToTensor()]
+
     if norm == "imagenet":
-        t += [transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])]
+        t += [transforms.Normalize([0.485, 0.456, 0.406],
+                                   [0.229, 0.224, 0.225])]
     elif norm == "gan":
-        t += [transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])]
+        t += [transforms.Normalize([0.5, 0.5, 0.5],
+                                   [0.5, 0.5, 0.5])]
     return transforms.Compose(t)
 
 def make_datasets_from_h5(
@@ -639,3 +683,19 @@ def make_loaders_with_existing_val(
         batch_size=batch_size, num_workers=num_workers, use_weighted_sampler=use_weighted_sampler
     )
     return train_loader, val_loader, test_loader, train_ds, val_ds, test_ds
+
+
+def fast_material_counts(ds):
+    assert ds.composition_key is not None, "No composition_key in dataset"
+    counts = Counter()
+    missing = 0
+    with h5py.File(ds.h5_path, "r") as f:
+        comp = f[ds.composition_key]
+        for i in ds.keep_idx:  
+            text = _decode_bytes(_as_scalar(comp[int(i)]))
+            mid = ds._dominant_material_id(text)
+            if mid is None:
+                missing += 1
+            else:
+                counts[int(mid)] += 1
+    return counts, missing
