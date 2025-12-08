@@ -1,0 +1,14 @@
+[
+  {
+    "id": 0,
+    "name": "men",
+    "support": 25286,
+    "accuracy": 0.9813730918294709
+  },
+  {
+    "id": 1,
+    "name": "women",
+    "support": 26821,
+    "accuracy": 0.979530964542709
+  }
+]

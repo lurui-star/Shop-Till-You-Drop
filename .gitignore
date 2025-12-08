@@ -24,6 +24,11 @@ env/
 
 # models (avoid pushing big files)
 checkpoints/
+# ignore .pt only under notebook/runs
+/runs/*.pt
+/runs/**/*.pt
+/notebook/runs/*.pt
+/notebook/runs/**/*.pt
 
 # VS Code
 .vscode/

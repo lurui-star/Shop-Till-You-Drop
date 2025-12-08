@@ -1,0 +1,50 @@
+[
+  {
+    "id": 0,
+    "name": "__other__",
+    "support": 3912,
+    "accuracy": 0.15618609406952966
+  },
+  {
+    "id": 1,
+    "name": "cotton",
+    "support": 24365,
+    "accuracy": 0.1666324646008619
+  },
+  {
+    "id": 2,
+    "name": "polyester",
+    "support": 3737,
+    "accuracy": 0.0016055659620016055
+  },
+  {
+    "id": 3,
+    "name": "leather",
+    "support": 8500,
+    "accuracy": 0.4824705882352941
+  },
+  {
+    "id": 4,
+    "name": "wool",
+    "support": 5816,
+    "accuracy": 0.000687757909215956
+  },
+  {
+    "id": 5,
+    "name": "nylon",
+    "support": 2921,
+    "accuracy": 0.29887024991441286
+  },
+  {
+    "id": 6,
+    "name": "elastane",
+    "support": 13,
+    "accuracy": 0.0
+  },
+  {
+    "id": 7,
+    "name": "viscose",
+    "support": 2843,
+    "accuracy": 0.0014069644741470278
+  }
+]

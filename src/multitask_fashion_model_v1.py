@@ -109,7 +109,8 @@ def collate_batch(
     lengths:    B (original lengths with bos/eos)
     """
     images = torch.stack([s["image"] for s in samples], dim=0)
-
+    idxs = torch.tensor([int(s["index"]) for s in samples], dtype=torch.long)
+    
     # category (optional)
     y_cat = None
     if expect_category and ("label" in samples[0]) and (samples[0]["label"] is not None):
@@ -150,6 +151,7 @@ def collate_batch(
 
     return {
         "images": images,
+        "idxs": idxs,
         "y_cat": y_cat,
         "y_gender": y_gender,
         "y_material": y_material,

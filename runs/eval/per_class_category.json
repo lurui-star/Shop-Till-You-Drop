@@ -1,0 +1,158 @@
+[
+  {
+    "id": 0,
+    "name": "__other__",
+    "support": 960,
+    "accuracy": 0.6802083333333333
+  },
+  {
+    "id": 1,
+    "name": "backpacks",
+    "support": 572,
+    "accuracy": 0.9073426573426573
+  },
+  {
+    "id": 2,
+    "name": "boots",
+    "support": 903,
+    "accuracy": 0.8305647840531561
+  },
+  {
+    "id": 3,
+    "name": "clutches & pouches",
+    "support": 224,
+    "accuracy": 0.6651785714285714
+  },
+  {
+    "id": 4,
+    "name": "dresses",
+    "support": 1892,
+    "accuracy": 0.8636363636363636
+  },
+  {
+    "id": 5,
+    "name": "duffle & top handle bags",
+    "support": 307,
+    "accuracy": 0.8566775244299675
+  },
+  {
+    "id": 6,
+    "name": "eyewear",
+    "support": 499,
+    "accuracy": 0.8797595190380761
+  },
+  {
+    "id": 7,
+    "name": "flats",
+    "support": 771,
+    "accuracy": 0.8106355382619974
+  },
+  {
+    "id": 8,
+    "name": "hats",
+    "support": 909,
+    "accuracy": 0.9922992299229924
+  },
+  {
+    "id": 9,
+    "name": "heels",
+    "support": 387,
+    "accuracy": 0.8165374677002584
+  },
+  {
+    "id": 10,
+    "name": "jackets & coats",
+    "support": 7007,
+    "accuracy": 0.8381618381618382
+  },
+  {
+    "id": 11,
+    "name": "jeans",
+    "support": 2718,
+    "accuracy": 0.7910228108903605
+  },
+  {
+    "id": 12,
+    "name": "jewelry",
+    "support": 987,
+    "accuracy": 0.8743667679837892
+  },
+  {
+    "id": 13,
+    "name": "lingerie",
+    "support": 263,
+    "accuracy": 0.8935361216730038
+  },
+  {
+    "id": 14,
+    "name": "pants",
+    "support": 4646,
+    "accuracy": 0.7763667671114938
+  },
+  {
+    "id": 15,
+    "name": "sandals",
+    "support": 703,
+    "accuracy": 0.8634423897581792
+  },
+  {
+    "id": 16,
+    "name": "scarves",
+    "support": 228,
+    "accuracy": 0.6885964912280702
+  },
+  {
+    "id": 17,
+    "name": "shirts",
+    "support": 2280,
+    "accuracy": 0.8416666666666667
+  },
+  {
+    "id": 18,
+    "name": "shorts",
+    "support": 1484,
+    "accuracy": 0.8140161725067385
+  },
+  {
+    "id": 19,
+    "name": "shoulder bags",
+    "support": 1391,
+    "accuracy": 0.8943206326383897
+  },
+  {
+    "id": 20,
+    "name": "skirts",
+    "support": 1382,
+    "accuracy": 0.7800289435600579
+  },
+  {
+    "id": 21,
+    "name": "sneakers",
+    "support": 2096,
+    "accuracy": 0.8897900763358778
+  },
+  {
+    "id": 22,
+    "name": "suits & blazers",
+    "support": 569,
+    "accuracy": 0.7838312829525483
+  },
+  {
+    "id": 23,
+    "name": "sweaters",
+    "support": 8919,
+    "accuracy": 0.8433680905931158
+  },
+  {
+    "id": 24,
+    "name": "tops",
+    "support": 9553,
+    "accuracy": 0.8509368784674971
+  },
+  {
+    "id": 25,
+    "name": "tote bags",
+    "support": 457,
+    "accuracy": 0.899343544857768
+  }
+]
