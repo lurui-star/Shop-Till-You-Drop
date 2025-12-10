@@ -3,6 +3,9 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+import torch
+from tqdm.auto import tqdm
+
 def _safe_idx2name(idx2name):
     return (lambda i: idx2name.get(int(i), str(i))) if isinstance(idx2name, dict) else (lambda i: str(i))
 
@@ -220,3 +223,27 @@ def plot_top_confusions_bar(cm, idx2name=None, k=20, min_support=10, title="Top 
     ax.set_title(title)
     plt.tight_layout()
     plt.show()
+
+
+
+@torch.no_grad()
+def embed_loader(model, loader, device):
+    model.eval()
+    ids, vecs, metas = [], [], []
+    for batch in tqdm(loader, desc="Embedding catalog"):
+        imgs = batch["images"].to(device)
+        out  = model(imgs)                 # expects FashionMultiTaskModel forward
+        z    = out["img_feat"]             # [B, D]
+        z    = torch.nn.functional.normalize(z, dim=-1)  # cosine-friendly
+        vecs.append(z.cpu().numpy())
+
+        # collect ids + metadata for later filtering
+        idxs = batch.get("idxs")
+        ids  += [int(i) for i in (idxs.tolist() if torch.is_tensor(idxs) else idxs)]
+        metas += [{
+            "category": (int(batch["y_cat"][i]) if batch.get("y_cat") is not None else None),
+            "gender":   (int(batch["y_gender"][i]) if batch.get("y_gender") is not None else None),
+            "material": (int(batch["y_material"][i]) if batch.get("y_material") is not None else None),
+            # add more: price, brand, color, product_id, etc. if available in batch["meta"]
+        } for i in range(len(imgs))]
+    return ids, np.vstack(vecs), metas
