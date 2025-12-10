@@ -29,6 +29,7 @@ checkpoints/
 /runs/**/*.pt
 /notebook/runs/*.pt
 /notebook/runs/**/*.pt
+notebook/runs/
 
 # VS Code
 .vscode/
