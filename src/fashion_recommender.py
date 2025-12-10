@@ -141,7 +141,7 @@ class TextAwareRecommender:
         self._tfidf = None  # matrix [N,V]
 
     # ----- build/save/load index -----
-    def build_from_loader(self, model, loader, out_dir="runs/index"):
+    def build_from_loader(self, model, loader, out_dir='runs/index', version ="v1"):
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         ids, vecs, meta, names = embed_loader(model, loader, self.device)
 
@@ -149,14 +149,14 @@ class TextAwareRecommender:
         index.add(vecs.astype(np.float32))
 
         side = {"ids": ids, "meta": meta, "names": names, "vecs": vecs}
-        with open(Path(out_dir)/"catalog_side.pkl", "wb") as f:
+        with open(Path(out_dir)/f"catalog_side_{version}.pkl", "wb") as f:
             pickle.dump(side, f, protocol=pickle.HIGHEST_PROTOCOL)
-        faiss.write_index(index, str(Path(out_dir)/"faiss_ip.index"))
+        faiss.write_index(index, str(Path(out_dir)/f"faiss_ip_{version}.index"))
 
         # build TF-IDF once and save
         vocab, idf, docs = _tfidf_fit(names)
         tfidf = np.vstack([_tfidf_vec(d, vocab, idf) for d in docs]) if len(names) else np.zeros((len(names),0), np.float32)
-        with open(Path(out_dir)/"tfidf.bin", "wb") as f:
+        with open(Path(out_dir)/f"tfidf_{version}.bin", "wb") as f:
             pickle.dump({"vocab":vocab, "idf":idf, "tfidf":tfidf}, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         self.index, self.side = index, side

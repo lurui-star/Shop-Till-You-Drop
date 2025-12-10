@@ -2,7 +2,7 @@ import math
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from collections import Counter
+from collections import Counter, defaultdict
 
 from tqdm.auto import tqdm
 
@@ -10,6 +10,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os, json
+import matplotlib.pyplot as plt
 
 try:
     import timm
@@ -397,6 +399,141 @@ def multitask_loss(
     return total, losses
 
 
+
+# =========================
+# Fit loop with logging/plots
+# =========================
+def fit(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    cfg,
+    device,
+    epochs: int = 10,
+    out_dir: str = "notebook/runs/exp1",
+    plot_filename: str = "loss_curve.png",
+    history_filename: str = "history.json",
+    ckpt_filename: str = "best_state_dict.pt",
+    batch_weighted: bool = True,
+):
+    """
+    Trains with a validation pass per epoch and saves:
+      - best checkpoint (by val total loss),
+      - history.json,
+      - loss_curve.png.
+    Self-contained: no external helpers required.
+    """
+    if val_loader is None:
+        raise ValueError("val_loader is None. Provide a validation DataLoader.")
+
+    os.makedirs(out_dir, exist_ok=True)
+    hist_path = os.path.join(out_dir, history_filename)
+    plot_path = os.path.join(out_dir, plot_filename)
+    ckpt_path = os.path.join(out_dir, ckpt_filename)
+
+    history = {
+        "epoch": [],
+        "train_total": [], "val_total": [],
+        "train_category_ce": [], "train_gender_ce": [], "train_material_ce": [], "train_caption_nll": [],
+        "val_category_ce":   [], "val_gender_ce":   [], "val_material_ce":   [], "val_caption_nll":   [],
+    }
+    best_val = float("inf")
+
+    # ---- local, no-grad validation step ----
+    @torch.no_grad()
+    def _val_step(batch):
+        model.eval()
+        images = batch["images"].to(device)
+        cap_in     = batch["cap_in"].to(device)     if batch.get("cap_in")   is not None else None
+        y_cat      = batch["y_cat"].to(device)      if batch.get("y_cat")    is not None else None
+        y_gender   = batch["y_gender"].to(device)   if batch.get("y_gender") is not None else None
+        y_material = batch.get("y_material")
+        y_material = y_material.to(device) if y_material is not None else None
+        cap_tgt    = batch["cap_tgt"].to(device)    if batch.get("cap_tgt")  is not None else None
+
+        out = model(images, cap_in=cap_in)
+        loss, parts = multitask_loss(
+            out,
+            y_cat, y_gender, cap_tgt,
+            pad_id=cfg.pad_id,
+            w_category=cfg.loss_w_category,
+            w_gender=cfg.loss_w_gender,
+            w_caption=cfg.loss_w_caption,
+            y_material=y_material,
+            w_material=cfg.loss_w_material,
+        )
+        parts["total"] = float(loss.item())
+        return parts
+
+    epochs_bar = tqdm(range(1, epochs + 1), desc="Epochs", position=0, leave=True)
+    for ep in epochs_bar:
+        # -------- Train --------
+        model.train()
+        sums, denom = defaultdict(float), 0.0
+        tbar = tqdm(train_loader, desc=f"Epoch {ep}/{epochs} [train]", position=1, leave=False)
+        for batch in tbar:
+            parts = one_training_step(model, batch, optimizer, cfg, device)  # uses your existing training step
+            B = batch["images"].size(0)
+            if batch_weighted:
+                for k, v in parts.items(): sums[k] += float(v) * B
+                denom += B
+            else:
+                for k, v in parts.items(): sums[k] += float(v)
+                denom += 1.0
+        tbar.close()
+        train_avg = {k: (sums[k] / max(1.0, denom)) for k in sums}
+
+        # -------- Validate --------
+        vsums, vden = defaultdict(float), 0.0
+        vbar = tqdm(val_loader, desc=f"Epoch {ep}/{epochs} [valid]", position=1, leave=False)
+        for vbatch in vbar:
+            vparts = _val_step(vbatch)
+            B = vbatch["images"].size(0)
+            if batch_weighted:
+                for k, v in vparts.items(): vsums[k] += float(v) * B
+                vden += B
+            else:
+                for k, v in vparts.items(): vsums[k] += float(v)
+                vden += 1.0
+        vbar.close()
+        val_avg = {k: (vsums[k] / max(1.0, vden)) for k in vsums}
+
+        # -------- Log / Save --------
+        epochs_bar.set_postfix_str(
+            f"train total={train_avg.get('total', math.nan):.4f} | val total={val_avg.get('total', math.nan):.4f}",
+            refresh=True
+        )
+
+        history["epoch"].append(ep)
+        history["train_total"].append(train_avg.get("total", math.nan))
+        history["val_total"].append(val_avg.get("total", math.nan))
+        history["train_category_ce"].append(train_avg.get("category_ce", math.nan))
+        history["train_gender_ce"].append(train_avg.get("gender_ce", math.nan))
+        history["train_material_ce"].append(train_avg.get("material_ce", math.nan))
+        history["train_caption_nll"].append(train_avg.get("caption_nll", math.nan))
+        history["val_category_ce"].append(val_avg.get("category_ce", math.nan))
+        history["val_gender_ce"].append(val_avg.get("gender_ce", math.nan))
+        history["val_material_ce"].append(val_avg.get("material_ce", math.nan))
+        history["val_caption_nll"].append(val_avg.get("caption_nll", math.nan))
+
+        if val_avg.get("total", float("inf")) < best_val:
+            best_val = val_avg["total"]
+            torch.save(model.state_dict(), ckpt_path)
+
+        with open(hist_path, "w") as f:
+            json.dump(history, f, indent=2)
+
+        plt.figure()
+        plt.plot(history["epoch"], history["train_total"], label="train")
+        plt.plot(history["epoch"], history["val_total"],   label="valid")
+        plt.xlabel("epoch"); plt.ylabel("total loss"); plt.title("Training vs Validation Loss")
+        plt.legend(); plt.tight_layout(); plt.savefig(plot_path); plt.close()
+
+    return history, ckpt_path
+
+
+
 # =========================
 # Minimal training loop stub
 # =========================
@@ -451,6 +588,7 @@ def worker_init_fn(worker_id: int):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
 
 
 # =========================
